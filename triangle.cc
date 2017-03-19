@@ -21,43 +21,8 @@ private:
   xcb_connection_t *connection_;
   xcb_window_t window_;
   xcb_screen_t *screen_;
-
+  xcb_intern_atom_reply_t *atom_wm_delete_window_;
 };
-
-
-static xcb_gcontext_t getFontGC(xcb_connection_t *connection,
-                          xcb_screen_t *screen,
-                          xcb_window_t window,
-                          const char *font_name ) {
-  xcb_font_t font = xcb_generate_id(connection);
-  xcb_open_font(connection, font, strlen(font_name), font_name);
-
-  xcb_gcontext_t gc = xcb_generate_id(connection);
-  uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_FONT;
-  uint32_t value_list[3] = {screen->black_pixel,
-                            screen->white_pixel,
-                            font};
-  xcb_create_gc(connection, gc, window, mask, value_list );
-
-  xcb_close_font(connection, font);
-
-  return gc;
-}
-
-
-static void drawText (xcb_connection_t  *connection,
-                      xcb_screen_t *screen,
-                      xcb_window_t window,
-                      int16_t x1,
-                      int16_t y1,
-                      const char *label) {
-  xcb_gcontext_t gc = getFontGC (connection, screen, window, "fixed");
-
-  xcb_void_cookie_t textCookie = \
-    xcb_image_text_8_checked(connection, strlen (label), window, gc, x1, y1,
-                             label);
-  xcb_void_cookie_t gcCookie = xcb_free_gc (connection, gc);
-}
 
 void Triangle::Loop() {
   xcb_generic_event_t  *event;
@@ -66,12 +31,16 @@ void Triangle::Loop() {
     if ( (event = xcb_poll_for_event(connection_)) ) {
       switch (event->response_type & ~0x80) {
         case XCB_EXPOSE: {
-          printf("Drawing");
-          fflush(stdout);
-          drawText(connection_, screen_, window_, 10, height_ - 10,
-                   "Press ESC key to exit..." );
+          // Stuff should go here?
           break;
         }
+        case XCB_CLIENT_MESSAGE: {
+          if ((*(xcb_client_message_event_t *)event).data.data32[0] ==
+          (*atom_wm_delete_window_).atom) {
+            exit(0);
+          }
+        }
+            break;
         case XCB_KEY_RELEASE: {
           xcb_key_release_event_t *kr = (xcb_key_release_event_t *)event;
 
@@ -114,7 +83,7 @@ void Triangle::CreateWindow(uint32_t x, uint32_t y,
 
   uint32_t event_mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
   uint32_t value_list[2];
-  value_list[0] = screen_->black_pixel;
+  value_list[0] = screen_->white_pixel;
   value_list[1] = XCB_EVENT_MASK_KEY_RELEASE |
               XCB_EVENT_MASK_BUTTON_PRESS |
               XCB_EVENT_MASK_EXPOSURE |
@@ -130,6 +99,22 @@ void Triangle::CreateWindow(uint32_t x, uint32_t y,
                     XCB_WINDOW_CLASS_INPUT_OUTPUT,  // class
                     screen_->root_visual,           // visual
                     event_mask, value_list);        // masks, not used yet
+
+  // Required to close the program when you close the window
+  xcb_intern_atom_cookie_t cookie =
+      xcb_intern_atom(connection_, 1, 12, "WM_PROTOCOLS");
+  xcb_intern_atom_reply_t *reply =
+      xcb_intern_atom_reply(connection_, cookie, 0);
+
+  xcb_intern_atom_cookie_t cookie2 =
+      xcb_intern_atom(connection_, 0, 16, "WM_DELETE_WINDOW");
+  atom_wm_delete_window_ =
+      xcb_intern_atom_reply(connection_, cookie2, 0);
+
+  xcb_change_property(connection_, XCB_PROP_MODE_REPLACE, window_,
+                      (*reply).atom, 4, 32, 1,
+                      &(*atom_wm_delete_window_).atom);
+  free(reply);
 
   xcb_map_window(connection_, window_);
 
