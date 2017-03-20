@@ -1,6 +1,6 @@
 CPPC=g++
 
-CFLAGS=-g -O0 -DVK_USE_PLATFORM_XCB_KHR
+CFLAGS=-g -O0 -DVK_USE_PLATFORM_XCB_KHR -Wall -Werror
 LD_FLAGS=-lvulkan -lxcb
 
 
