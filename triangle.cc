@@ -6,12 +6,41 @@
 #include <assert.h>
 #include <fstream>
 #include <limits>
+#include <glm/glm.hpp>
+#include <array>
 
 #include <xcb/xcb.h>
 #include <vulkan/vulkan.h>
 
 #include "vulkan-core.h"
 
+struct Vertex {
+  glm::vec2 pos;
+  glm::vec3 color;
+
+  static VkVertexInputBindingDescription getBindingDescription() {
+    VkVertexInputBindingDescription bindingDescription = {};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = sizeof(Vertex);
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    return bindingDescription;
+  }
+
+  static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+    std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions = {};
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+    attributeDescriptions[0].offset = offsetof(Vertex, pos);
+
+    attributeDescriptions[1].binding = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributeDescriptions[1].offset = offsetof(Vertex, color);
+
+    return attributeDescriptions;
+  }
+};
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugReportFlagsEXT flags, VkDebugReportObjectTypeEXT objType,
@@ -30,6 +59,7 @@ public:
     InitVulkanInstance();
     InitVulkanPhysicalDevice();
     CreateSurface();
+    //DrawFrame();
   }
   void Loop();
 
@@ -38,6 +68,12 @@ public:
 private:
 
   const char *application_name_ = "Triangle";
+
+  const std::vector<Vertex> vertices_ = {
+    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+  };
 
   // Shader stuff
   VkShaderModule shader_module_;
@@ -50,6 +86,8 @@ private:
   VkSwapchainKHR swap_chain_;
   VkCommandPool command_pool_;
   std::vector<VkCommandBuffer> command_buffers_;
+
+  VkBuffer vertex_buffer_;
 
   VkSemaphore image_available_semaphore_;
   VkSemaphore render_finished_semaphore_;
@@ -69,6 +107,7 @@ private:
   void InitVulkanInstance();
   void InitVulkanPhysicalDevice();
   void CreateSurface();
+  void DrawFrame();
 
   const std::vector<const char*> validation_layers_ = {
     "VK_LAYER_LUNARG_standard_validation"
@@ -243,10 +282,13 @@ void Triangle::CreateSurface() {
 
   VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
   vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-  vertexInputInfo.vertexBindingDescriptionCount = 0;
-  vertexInputInfo.pVertexBindingDescriptions = NULL; // Optional
-  vertexInputInfo.vertexAttributeDescriptionCount = 0;
-  vertexInputInfo.pVertexAttributeDescriptions = NULL; // Optional
+  auto bindingDescription = Vertex::getBindingDescription();
+  auto attributeDescriptions = Vertex::getAttributeDescriptions();
+
+  vertexInputInfo.vertexBindingDescriptionCount = 1;
+  vertexInputInfo.vertexAttributeDescriptionCount = attributeDescriptions.size();
+  vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+  vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
   // Input assembly
   VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
@@ -424,6 +466,21 @@ void Triangle::CreateSurface() {
   VK_CHECK_RESULT(
     vkCreateCommandPool(device_, &poolInfo, NULL, &command_pool_));
 
+  // Create vertex buffer
+  VkBufferCreateInfo bufferInfo = {};
+  bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferInfo.size = sizeof(vertices_[0]) * vertices_.size();
+  bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+  bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  VK_CHECK_RESULT(vkCreateBuffer(device_, &bufferInfo, NULL, &vertex_buffer_));
+
+  VkMemoryRequirements memRequirements;
+  vkGetBufferMemoryRequirements(device_, vertex_buffer_, &memRequirements);
+
+  VkPhysicalDeviceMemoryProperties memProperties;
+  vkGetPhysicalDeviceMemoryProperties(physical_device_, &memProperties);
+
+  // Command buffers
   command_buffers_.resize(swap_chain_frame_buffers_.size());
   VkCommandBufferAllocateInfo allocInfo = {};
   allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -463,55 +520,58 @@ void Triangle::CreateSurface() {
     vkCreateSemaphore(device_, &semaphoreInfo, NULL, &image_available_semaphore_));
   VK_CHECK_RESULT(
     vkCreateSemaphore(device_, &semaphoreInfo, NULL, &render_finished_semaphore_));
+}
 
-  uint32_t imageIndex;
-  vkAcquireNextImageKHR(device_, swap_chain_, std::numeric_limits<uint64_t>::max(), image_available_semaphore_, VK_NULL_HANDLE, &imageIndex);
+void Triangle::DrawFrame() {
 
-  VkSubmitInfo submitInfo = {};
-  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    uint32_t imageIndex;
+    vkAcquireNextImageKHR(device_, swap_chain_, std::numeric_limits<uint64_t>::max(), image_available_semaphore_, VK_NULL_HANDLE, &imageIndex);
 
-  VkSemaphore waitSemaphores[] = {image_available_semaphore_};
-  VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-  submitInfo.waitSemaphoreCount = 1;
-  submitInfo.pWaitSemaphores = waitSemaphores;
-  submitInfo.pWaitDstStageMask = waitStages;
-  submitInfo.commandBufferCount = 1;
-  submitInfo.pCommandBuffers = &command_buffers_[imageIndex];
-  VkSemaphore signalSemaphores[] = {render_finished_semaphore_};
-  submitInfo.signalSemaphoreCount = 1;
-  submitInfo.pSignalSemaphores = signalSemaphores;
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-  VK_CHECK_RESULT(
-    vkQueueSubmit(graphics_queue_, 1, &submitInfo, VK_NULL_HANDLE));
+    VkSemaphore waitSemaphores[] = {image_available_semaphore_};
+    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &command_buffers_[imageIndex];
+    VkSemaphore signalSemaphores[] = {render_finished_semaphore_};
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores = signalSemaphores;
 
-  // WTF STUFF
-  VkSubpassDependency dependency = {};
-  dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-  dependency.dstSubpass = 0;
+    VK_CHECK_RESULT(
+      vkQueueSubmit(graphics_queue_, 1, &submitInfo, VK_NULL_HANDLE));
 
-  dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  dependency.srcAccessMask = 0;
+    // WTF STUFF
+    // VkSubpassDependency dependency = {};
+    // dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    // dependency.dstSubpass = 0;
+    //
+    // dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // dependency.srcAccessMask = 0;
+    //
+    // dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    //
+    // renderPassInfo.dependencyCount = 1;
+    // renderPassInfo.pDependencies = &dependency;
 
-  dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    // PRESENTATION
 
-  renderPassInfo.dependencyCount = 1;
-  renderPassInfo.pDependencies = &dependency;
+    VkPresentInfoKHR presentInfo = {};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 
-  // PRESENTATION
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = signalSemaphores;
 
-  VkPresentInfoKHR presentInfo = {};
-  presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
-  presentInfo.waitSemaphoreCount = 1;
-  presentInfo.pWaitSemaphores = signalSemaphores;
-
-  VkSwapchainKHR swapChains[] = {swap_chain_};
-  presentInfo.swapchainCount = 1;
-  presentInfo.pSwapchains = swapChains;
-  presentInfo.pImageIndices = &imageIndex;
-  presentInfo.pResults = NULL; // Optional
-  vkQueuePresentKHR(present_queue_, &presentInfo);
+    VkSwapchainKHR swapChains[] = {swap_chain_};
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = swapChains;
+    presentInfo.pImageIndices = &imageIndex;
+    presentInfo.pResults = NULL; // Optional
+    vkQueuePresentKHR(present_queue_, &presentInfo);
 }
 
 void Triangle::InitVulkanPhysicalDevice() {
@@ -645,7 +705,6 @@ void Triangle::Loop() {
     if ( (event = xcb_poll_for_event(connection_)) ) {
       switch (event->response_type & ~0x80) {
         case XCB_EXPOSE: {
-          // Stuff should go here?
           break;
         }
         case XCB_CLIENT_MESSAGE: {
@@ -671,6 +730,8 @@ void Triangle::Loop() {
       }
 
     }
+    // Stuff should go here?
+    DrawFrame();
   }
 
 }
