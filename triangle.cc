@@ -12,6 +12,7 @@
 #include <xcb/xcb.h>
 #include <vulkan/vulkan.h>
 
+#include "vulkan-utils.h"
 #include "vulkan-core.h"
 
 struct Vertex {
@@ -42,14 +43,6 @@ struct Vertex {
   }
 };
 
-static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-    VkDebugReportFlagsEXT flags, VkDebugReportObjectTypeEXT objType,
-    uint64_t obj, size_t location, int32_t code, const char* layerPrefix,
-    const char* msg, void* userData) {
-  std::cerr << "validation layer: " << msg << std::endl;
-  return VK_FALSE;
-}
-
 class Triangle : public VulkanCore {
 public:
   Triangle() {}
@@ -70,7 +63,7 @@ private:
   const char *application_name_ = "Triangle";
 
   const std::vector<Vertex> vertices_ = {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.0f, -0.9f}, {1.0f, 0.0f, 1.0f}},
     {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
     {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
   };
@@ -86,6 +79,8 @@ private:
   VkSwapchainKHR swap_chain_;
   VkCommandPool command_pool_;
   std::vector<VkCommandBuffer> command_buffers_;
+
+  VkDeviceMemory vertex_buffer_memory_;
 
   VkBuffer vertex_buffer_;
 
@@ -480,6 +475,33 @@ void Triangle::CreateSurface() {
   VkPhysicalDeviceMemoryProperties memProperties;
   vkGetPhysicalDeviceMemoryProperties(physical_device_, &memProperties);
 
+  uint32_t memory_type = 0;
+  uint32_t type_filter = memRequirements.memoryTypeBits;
+  VkMemoryPropertyFlags properties =
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+  for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+    if ((type_filter & (1 << i)) &&
+        (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+      memory_type = i;
+    }
+  }
+
+  VkMemoryAllocateInfo memallocInfo = {};
+  memallocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  memallocInfo.allocationSize = memRequirements.size;
+  memallocInfo.memoryTypeIndex = memory_type;
+
+  VK_CHECK_RESULT(
+    vkAllocateMemory(device_, &memallocInfo, NULL, &vertex_buffer_memory_))
+
+  vkBindBufferMemory(device_, vertex_buffer_, vertex_buffer_memory_, 0);
+
+  void *data;
+  vkMapMemory(device_, vertex_buffer_memory_, 0, bufferInfo.size, 0, &data);
+  memcpy(data, vertices_.data(), (size_t) bufferInfo.size);
+  vkUnmapMemory(device_, vertex_buffer_memory_);
+
   // Command buffers
   command_buffers_.resize(swap_chain_frame_buffers_.size());
   VkCommandBufferAllocateInfo allocInfo = {};
@@ -510,7 +532,13 @@ void Triangle::CreateSurface() {
     renderPassInfo.pClearValues = &clearColor;
     vkCmdBeginRenderPass(command_buffers_[i], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(command_buffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline_);
-    vkCmdDraw(command_buffers_[i], 3, 1, 0, 0);
+
+    VkBuffer vertexBuffers[] = {vertex_buffer_};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(command_buffers_[i], 0, 1, vertexBuffers, offsets);
+
+    vkCmdDraw(command_buffers_[i], vertices_.size(), 1, 0, 0);
+
     vkCmdEndRenderPass(command_buffers_[i]);
     VK_CHECK_RESULT(vkEndCommandBuffer(command_buffers_[i]));
   }

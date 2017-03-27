@@ -1,16 +1,6 @@
 
-#include <iostream>
-
-#include <xcb/xcb.h>
-#include <vulkan/vulkan.h>
-
-#define VK_CHECK_RESULT(f) { \
-  VkResult res = (f); \
-  if (res != VK_SUCCESS) { \
-    fprintf(stderr, "VkResult != VK_SUCCESS\n"); \
-    exit(1); \
-  } \
-}
+#ifndef _VULKAN_CORE_H
+#define _VULKAN_CORE_H
 
 class VulkanCore {
 public:
@@ -18,3 +8,5 @@ public:
   virtual ~VulkanCore() {}
   virtual void InitVulkan() {}
 };
+
+#endif // _VULKAN_CORE_H
