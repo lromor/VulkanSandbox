@@ -272,7 +272,7 @@ void Triangle::CreateSurface() {
   vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device_, surface_, &presentModeCount, presentModes.data());
 
   // We skip checks, as always...
-  VkSurfaceFormatKHR surfaceFormat = formats[0];
+  VkSurfaceFormatKHR surfaceFormat = formats[1];
   VkPresentModeKHR presentMode = presentModes[0];
   VkExtent2D extent = {800, 600};
 
