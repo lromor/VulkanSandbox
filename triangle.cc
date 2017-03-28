@@ -63,9 +63,14 @@ private:
   const char *application_name_ = "Triangle";
 
   const std::vector<Vertex> vertices_ = {
-    {{0.0f, -0.9f}, {1.0f, 0.0f, 1.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+  };
+
+  const std::vector<uint16_t> indices_ = {
+      0, 1, 2, 2, 3, 0
   };
 
   // Shader stuff
@@ -81,8 +86,9 @@ private:
   std::vector<VkCommandBuffer> command_buffers_;
 
   VkDeviceMemory vertex_buffer_memory_;
-
   VkBuffer vertex_buffer_;
+  VkDeviceMemory index_buffer_memory_;
+  VkBuffer index_buffer_;
 
   VkSemaphore image_available_semaphore_;
   VkSemaphore render_finished_semaphore_;
@@ -104,6 +110,11 @@ private:
   void CreateSurface();
   void DrawFrame();
 
+  void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+  void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                    VkMemoryPropertyFlags properties, VkBuffer *buffer,
+                    VkDeviceMemory *bufferMemory);
+
   const std::vector<const char*> validation_layers_ = {
     "VK_LAYER_LUNARG_standard_validation"
   };
@@ -116,6 +127,74 @@ private:
   xcb_screen_t *screen_;
   xcb_intern_atom_reply_t *atom_wm_delete_window_;
 };
+
+void Triangle::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                  VkMemoryPropertyFlags properties, VkBuffer *buffer,
+                  VkDeviceMemory *bufferMemory) {
+  VkBufferCreateInfo bufferInfo = {};
+  bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  bufferInfo.size = size;
+  bufferInfo.usage = usage;
+  bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+  VK_CHECK_RESULT(vkCreateBuffer(device_, &bufferInfo, NULL, buffer));
+  VkMemoryRequirements memRequirements;
+  vkGetBufferMemoryRequirements(device_, *buffer, &memRequirements);
+
+  VkMemoryAllocateInfo allocInfo = {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocInfo.allocationSize = memRequirements.size;
+
+  VkPhysicalDeviceMemoryProperties memProperties;
+  vkGetPhysicalDeviceMemoryProperties(physical_device_, &memProperties);
+
+  uint32_t memory_type = 0;
+  uint32_t type_filter = memRequirements.memoryTypeBits;
+
+  for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+    if ((type_filter & (1 << i)) &&
+        (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+      memory_type = i;
+    }
+  }
+
+  allocInfo.memoryTypeIndex = memory_type;
+
+  VK_CHECK_RESULT(vkAllocateMemory(device_, &allocInfo, NULL, bufferMemory));
+
+  vkBindBufferMemory(device_, *buffer, *bufferMemory, 0);
+}
+
+void Triangle::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+  VkCommandBufferAllocateInfo allocInfo = {};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandPool = command_pool_;
+  allocInfo.commandBufferCount = 1;
+
+  VkCommandBuffer commandBuffer;
+  vkAllocateCommandBuffers(device_, &allocInfo, &commandBuffer);
+  VkCommandBufferBeginInfo beginInfo = {};
+  beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+  vkBeginCommandBuffer(commandBuffer, &beginInfo);
+  VkBufferCopy copyRegion = {};
+  copyRegion.srcOffset = 0; // Optional
+  copyRegion.dstOffset = 0; // Optional
+  copyRegion.size = size;
+  vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+  vkEndCommandBuffer(commandBuffer);
+
+  VkSubmitInfo submitInfo = {};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &commandBuffer;
+
+  vkQueueSubmit(graphics_queue_, 1, &submitInfo, VK_NULL_HANDLE);
+  vkQueueWaitIdle(graphics_queue_);
+  vkFreeCommandBuffers(device_, command_pool_, 1, &commandBuffer);
+}
 
 void Triangle::LoadShaderModule(const char *path, VkShaderModule *module) {
   // Open the file
@@ -359,7 +438,7 @@ void Triangle::CreateSurface() {
   colorBlending.blendConstants[2] = 0.0f; // Optional
   colorBlending.blendConstants[3] = 0.0f; // Optional
 
-  // Dynamic state
+  // // Dynamic state
   // VkDynamicState dynamicStates[] = {
   //     VK_DYNAMIC_STATE_VIEWPORT,
   //     VK_DYNAMIC_STATE_LINE_WIDTH
@@ -395,10 +474,19 @@ void Triangle::CreateSurface() {
   VkAttachmentReference colorAttachmentRef = {};
   colorAttachmentRef.attachment = 0;
   colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
   VkSubpassDescription subpass = {};
   subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   subpass.colorAttachmentCount = 1;
   subpass.pColorAttachments = &colorAttachmentRef;
+
+  VkSubpassDependency dependency = {};
+  dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+  dependency.dstSubpass = 0;
+  dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dependency.srcAccessMask = 0;
+  dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
   // Create the render pass
   VkRenderPassCreateInfo renderPassInfo = {};
@@ -407,6 +495,8 @@ void Triangle::CreateSurface() {
   renderPassInfo.pAttachments = &colorAttachment;
   renderPassInfo.subpassCount = 1;
   renderPassInfo.pSubpasses = &subpass;
+  renderPassInfo.dependencyCount = 1;
+  renderPassInfo.pDependencies = &dependency;
 
   VK_CHECK_RESULT(
     vkCreateRenderPass(device_, &renderPassInfo, NULL, &render_pass_));
@@ -430,7 +520,7 @@ void Triangle::CreateSurface() {
   pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
   pipelineInfo.basePipelineIndex = -1; // Optional
   VK_CHECK_RESULT(
-    vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphics_pipeline_));
+    vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &graphics_pipeline_));
 
   // Framebuffers
 
@@ -462,45 +552,38 @@ void Triangle::CreateSurface() {
     vkCreateCommandPool(device_, &poolInfo, NULL, &command_pool_));
 
   // Create vertex buffer
-  VkBufferCreateInfo bufferInfo = {};
-  bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  bufferInfo.size = sizeof(vertices_[0]) * vertices_.size();
-  bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-  bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  VK_CHECK_RESULT(vkCreateBuffer(device_, &bufferInfo, NULL, &vertex_buffer_));
+  VkDeviceSize bufferSize = sizeof(vertices_[0]) * vertices_.size();
 
-  VkMemoryRequirements memRequirements;
-  vkGetBufferMemoryRequirements(device_, vertex_buffer_, &memRequirements);
-
-  VkPhysicalDeviceMemoryProperties memProperties;
-  vkGetPhysicalDeviceMemoryProperties(physical_device_, &memProperties);
-
-  uint32_t memory_type = 0;
-  uint32_t type_filter = memRequirements.memoryTypeBits;
-  VkMemoryPropertyFlags properties =
-    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-  for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-    if ((type_filter & (1 << i)) &&
-        (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-      memory_type = i;
-    }
-  }
-
-  VkMemoryAllocateInfo memallocInfo = {};
-  memallocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  memallocInfo.allocationSize = memRequirements.size;
-  memallocInfo.memoryTypeIndex = memory_type;
-
-  VK_CHECK_RESULT(
-    vkAllocateMemory(device_, &memallocInfo, NULL, &vertex_buffer_memory_))
-
-  vkBindBufferMemory(device_, vertex_buffer_, vertex_buffer_memory_, 0);
-
+  VkBuffer stagingBuffer;
+  VkDeviceMemory stagingBufferMemory;
+  CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+               &stagingBuffer, &stagingBufferMemory);
   void *data;
-  vkMapMemory(device_, vertex_buffer_memory_, 0, bufferInfo.size, 0, &data);
-  memcpy(data, vertices_.data(), (size_t) bufferInfo.size);
-  vkUnmapMemory(device_, vertex_buffer_memory_);
+  vkMapMemory(device_, stagingBufferMemory, 0, bufferSize, 0, &data);
+  memcpy(data, vertices_.data(), (size_t) bufferSize);
+  vkUnmapMemory(device_, stagingBufferMemory);
+
+  CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    &vertex_buffer_, &vertex_buffer_memory_);
+
+  CopyBuffer(stagingBuffer, vertex_buffer_, bufferSize);
+
+  // Create index buffer
+  bufferSize = sizeof(indices_[0]) * indices_.size();
+  VkBuffer stagingBuffer2;
+  VkDeviceMemory stagingBufferMemory2;
+  CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &stagingBuffer2, &stagingBufferMemory2);
+
+  vkMapMemory(device_, stagingBufferMemory2, 0, bufferSize, 0, &data);
+  memcpy(data, indices_.data(), (size_t) bufferSize);
+  vkUnmapMemory(device_, stagingBufferMemory2);
+
+  CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &index_buffer_, &index_buffer_memory_);
+
+  CopyBuffer(stagingBuffer2, index_buffer_, bufferSize);
 
   // Command buffers
   command_buffers_.resize(swap_chain_frame_buffers_.size());
@@ -536,8 +619,8 @@ void Triangle::CreateSurface() {
     VkBuffer vertexBuffers[] = {vertex_buffer_};
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(command_buffers_[i], 0, 1, vertexBuffers, offsets);
-
-    vkCmdDraw(command_buffers_[i], vertices_.size(), 1, 0, 0);
+    vkCmdBindIndexBuffer(command_buffers_[i], index_buffer_, 0, VK_INDEX_TYPE_UINT16);
+    vkCmdDrawIndexed(command_buffers_[i], indices_.size(), 1, 0, 0, 0);
 
     vkCmdEndRenderPass(command_buffers_[i]);
     VK_CHECK_RESULT(vkEndCommandBuffer(command_buffers_[i]));
@@ -551,55 +634,39 @@ void Triangle::CreateSurface() {
 }
 
 void Triangle::DrawFrame() {
+  uint32_t imageIndex;
+  vkAcquireNextImageKHR(device_, swap_chain_, std::numeric_limits<uint64_t>::max(), image_available_semaphore_, VK_NULL_HANDLE, &imageIndex);
 
-    uint32_t imageIndex;
-    vkAcquireNextImageKHR(device_, swap_chain_, std::numeric_limits<uint64_t>::max(), image_available_semaphore_, VK_NULL_HANDLE, &imageIndex);
+  VkSubmitInfo submitInfo = {};
+  submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-    VkSubmitInfo submitInfo = {};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+  VkSemaphore waitSemaphores[] = {image_available_semaphore_};
+  VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+  submitInfo.waitSemaphoreCount = 1;
+  submitInfo.pWaitSemaphores = waitSemaphores;
+  submitInfo.pWaitDstStageMask = waitStages;
+  submitInfo.commandBufferCount = 1;
+  submitInfo.pCommandBuffers = &command_buffers_[imageIndex];
+  VkSemaphore signalSemaphores[] = {render_finished_semaphore_};
+  submitInfo.signalSemaphoreCount = 1;
+  submitInfo.pSignalSemaphores = signalSemaphores;
 
-    VkSemaphore waitSemaphores[] = {image_available_semaphore_};
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &command_buffers_[imageIndex];
-    VkSemaphore signalSemaphores[] = {render_finished_semaphore_};
-    submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
+  VK_CHECK_RESULT(
+    vkQueueSubmit(graphics_queue_, 1, &submitInfo, VK_NULL_HANDLE));
 
-    VK_CHECK_RESULT(
-      vkQueueSubmit(graphics_queue_, 1, &submitInfo, VK_NULL_HANDLE));
+  // PRESENTATION
+  VkPresentInfoKHR presentInfo = {};
+  presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 
-    // WTF STUFF
-    // VkSubpassDependency dependency = {};
-    // dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-    // dependency.dstSubpass = 0;
-    //
-    // dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    // dependency.srcAccessMask = 0;
-    //
-    // dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    // dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    //
-    // renderPassInfo.dependencyCount = 1;
-    // renderPassInfo.pDependencies = &dependency;
+  presentInfo.waitSemaphoreCount = 1;
+  presentInfo.pWaitSemaphores = signalSemaphores;
 
-    // PRESENTATION
-
-    VkPresentInfoKHR presentInfo = {};
-    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = signalSemaphores;
-
-    VkSwapchainKHR swapChains[] = {swap_chain_};
-    presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = swapChains;
-    presentInfo.pImageIndices = &imageIndex;
-    presentInfo.pResults = NULL; // Optional
-    vkQueuePresentKHR(present_queue_, &presentInfo);
+  VkSwapchainKHR swapChains[] = {swap_chain_};
+  presentInfo.swapchainCount = 1;
+  presentInfo.pSwapchains = swapChains;
+  presentInfo.pImageIndices = &imageIndex;
+  presentInfo.pResults = NULL; // Optional
+  vkQueuePresentKHR(present_queue_, &presentInfo);
 }
 
 void Triangle::InitVulkanPhysicalDevice() {
@@ -760,6 +827,7 @@ void Triangle::Loop() {
     }
     // Stuff should go here?
     DrawFrame();
+    usleep(1e3);
   }
 
 }
