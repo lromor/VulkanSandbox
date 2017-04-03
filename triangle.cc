@@ -6,8 +6,12 @@
 #include <assert.h>
 #include <fstream>
 #include <limits>
+#define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <array>
+
+#include <chrono>
 
 #include <xcb/xcb.h>
 #include <vulkan/vulkan.h>
@@ -41,6 +45,12 @@ struct Vertex {
 
     return attributeDescriptions;
   }
+};
+
+struct UniformBufferObject {
+    glm::mat4 model;
+    glm::mat4 view;
+    glm::mat4 proj;
 };
 
 class Triangle : public VulkanCore {
@@ -89,6 +99,13 @@ private:
   VkBuffer vertex_buffer_;
   VkDeviceMemory index_buffer_memory_;
   VkBuffer index_buffer_;
+  VkBuffer uniform_staging_buffer_;
+  VkDeviceMemory uniform_staging_buffer_memory_;
+  VkBuffer uniform_buffer_;
+  VkDeviceMemory uniform_buffer_memory_;
+
+  VkDescriptorPool descriptor_pool_;
+  VkDescriptorSet descriptor_set_;
 
   VkSemaphore image_available_semaphore_;
   VkSemaphore render_finished_semaphore_;
@@ -100,15 +117,18 @@ private:
   VkFormat swapChainImageFormat;
   std::vector<VkImageView> swap_chain_image_views_;
 
+  VkDescriptorSetLayout descriptor_set_layout_;
   VkPipelineLayout pipeline_layout_;
   VkRenderPass render_pass_;
   VkPipeline graphics_pipeline_;
   std::vector<VkFramebuffer> swap_chain_frame_buffers_;
 
+
   void InitVulkanInstance();
   void InitVulkanPhysicalDevice();
   void CreateSurface();
   void DrawFrame();
+  void UpdateUniformBuffer();
 
   void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
   void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
@@ -330,6 +350,26 @@ void Triangle::CreateSurface() {
       vkCreateImageView(device_, &createInfo2, NULL, &swap_chain_image_views_[i]));
   }
 
+
+  // Create createDescriptorSetLayout
+  VkDescriptorSetLayoutBinding uboLayoutBinding = {};
+  uboLayoutBinding.binding = 0;
+  uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  uboLayoutBinding.descriptorCount = 1;
+  uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  uboLayoutBinding.pImmutableSamplers = NULL;
+
+  VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+  layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  layoutInfo.bindingCount = 1;
+  layoutInfo.pBindings = &uboLayoutBinding;
+
+  VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device_,
+    &layoutInfo, NULL, &descriptor_set_layout_));
+
+
+
+  // PIPELINE stuff
   // Let's create the shaders
   VkShaderModule vertex;
   VkShaderModule fragment;
@@ -397,7 +437,7 @@ void Triangle::CreateSurface() {
   rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
   rasterizer.lineWidth = 1.0f;
   rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-  rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+  rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rasterizer.depthBiasEnable = VK_FALSE;
   rasterizer.depthBiasConstantFactor = 0.0f; // Optional
   rasterizer.depthBiasClamp = 0.0f; // Optional
@@ -450,10 +490,11 @@ void Triangle::CreateSurface() {
   // dynamicState.pDynamicStates = dynamicStates;
 
   // Create pipeline layout
+  VkDescriptorSetLayout setLayouts[] = {descriptor_set_layout_};
   VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
   pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-  pipelineLayoutInfo.setLayoutCount = 0; // Optional
-  pipelineLayoutInfo.pSetLayouts = nullptr; // Optional
+  pipelineLayoutInfo.setLayoutCount = 1;
+  pipelineLayoutInfo.pSetLayouts = setLayouts;
   pipelineLayoutInfo.pushConstantRangeCount = 0; // Optional
   pipelineLayoutInfo.pPushConstantRanges = 0; // Optional
 
@@ -585,6 +626,54 @@ void Triangle::CreateSurface() {
 
   CopyBuffer(stagingBuffer2, index_buffer_, bufferSize);
 
+  bufferSize = sizeof(UniformBufferObject);
+
+  CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniform_staging_buffer_, &uniform_staging_buffer_memory_);
+  CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &uniform_buffer_, &uniform_buffer_memory_);
+
+  // Descriptor POOL...
+  VkDescriptorPoolSize poolSize = {};
+  poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  poolSize.descriptorCount = 1;
+
+  VkDescriptorPoolCreateInfo poolInfo2 = {};
+  poolInfo2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+  poolInfo2.poolSizeCount = 1;
+  poolInfo2.pPoolSizes = &poolSize;
+
+  poolInfo2.maxSets = 1;
+
+  VK_CHECK_RESULT(vkCreateDescriptorPool(device_, &poolInfo2, NULL, &descriptor_pool_));
+
+  VkDescriptorSetLayout layouts[] = {descriptor_set_layout_};
+  VkDescriptorSetAllocateInfo allocInfo2 = {};
+  allocInfo2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+  allocInfo2.descriptorPool = descriptor_pool_;
+  allocInfo2.descriptorSetCount = 1;
+  allocInfo2.pSetLayouts = layouts;
+
+  VK_CHECK_RESULT(vkAllocateDescriptorSets(device_, &allocInfo2, &descriptor_set_));
+
+  VkDescriptorBufferInfo bufferInfo = {};
+  bufferInfo.buffer = uniform_buffer_;
+  bufferInfo.offset = 0;
+  bufferInfo.range = sizeof(UniformBufferObject);
+
+  VkWriteDescriptorSet descriptorWrite = {};
+  descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+  descriptorWrite.dstSet = descriptor_set_;
+  descriptorWrite.dstBinding = 0;
+  descriptorWrite.dstArrayElement = 0;
+
+  descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  descriptorWrite.descriptorCount = 1;
+
+  descriptorWrite.pBufferInfo = &bufferInfo;
+  descriptorWrite.pImageInfo = NULL; // Optional
+  descriptorWrite.pTexelBufferView = NULL; // Optional
+
+  vkUpdateDescriptorSets(device_, 1, &descriptorWrite, 0, NULL);
+
   // Command buffers
   command_buffers_.resize(swap_chain_frame_buffers_.size());
   VkCommandBufferAllocateInfo allocInfo = {};
@@ -620,6 +709,7 @@ void Triangle::CreateSurface() {
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(command_buffers_[i], 0, 1, vertexBuffers, offsets);
     vkCmdBindIndexBuffer(command_buffers_[i], index_buffer_, 0, VK_INDEX_TYPE_UINT16);
+    vkCmdBindDescriptorSets(command_buffers_[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1, &descriptor_set_, 0, NULL);
     vkCmdDrawIndexed(command_buffers_[i], indices_.size(), 1, 0, 0, 0);
 
     vkCmdEndRenderPass(command_buffers_[i]);
@@ -793,6 +883,29 @@ void Triangle::InitVulkanInstance() {
     vkCreateDebugReportCallbackEXT(instance_, &createInfo, NULL, &callback_));
 }
 
+void Triangle::UpdateUniformBuffer() {
+  UniformBufferObject ubo = {};
+  static auto startTime = std::chrono::high_resolution_clock::now();
+
+  auto currentTime = std::chrono::high_resolution_clock::now();
+  float time = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime).count() / 1000.0f;
+
+  ubo.model = glm::rotate(glm::mat4(), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+  ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+  ubo.proj = glm::perspective(glm::radians(45.0f), 800 / (float) 600, 0.1f, 10.0f);
+
+  ubo.proj[1][1] *= -1;
+
+  void* data;
+  vkMapMemory(device_, uniform_staging_buffer_memory_, 0, sizeof(ubo), 0, &data);
+  memcpy(data, &ubo, sizeof(ubo));
+  vkUnmapMemory(device_, uniform_staging_buffer_memory_);
+
+  CopyBuffer(uniform_staging_buffer_, uniform_buffer_, sizeof(ubo));
+}
+
 void Triangle::Loop() {
   xcb_generic_event_t  *event;
   for (;;) {
@@ -826,6 +939,8 @@ void Triangle::Loop() {
 
     }
     // Stuff should go here?
+    // Update uniform buffer
+    UpdateUniformBuffer();
     DrawFrame();
     usleep(1e3);
   }
